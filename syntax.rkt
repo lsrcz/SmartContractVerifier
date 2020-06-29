@@ -23,10 +23,12 @@
 
 (struct assign-var-stmt (name val) #:transparent)
 (struct assign-address-stmt (addr name val) #:transparent)
-(struct assign-pointer-stmt (ptr name val) #:transparent)
+(struct assign-member-stmt (ptr name val) #:transparent)
+
 
 (struct return-stmt (val) #:transparent)
-(struct revert-stmt () #:transparent)
 (struct binary-builtin-expr (op lhs rhs) #:transparent)
 (struct unary-builtin-expr (op operand) #:transparent)
 (struct sequence-stmt (lst) #:transparent)
+
+(struct new-slot-stmt (type) #:transparent)

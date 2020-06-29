@@ -26,16 +26,19 @@
                  (cons (cons r lst) efin)))))
      (lambda (e)
        (define func (env-resolve-func e name))
+
        (let* ([e0 (compiled-addr e)]
               [addr0 (env-get-retval e0)]
               [val (iter e compiled-args)]
               [e1 (cdr val)]
               [arglist (car val)]
               [e2 (func (env-set-args (env-push-stack e1 addr0) arglist))]
-              [status (env-get-status e2)])
+              [status (env-get-status e2)]
+              [val (env-get-retval e2)])
+
          (if (eq? status 'rev)
-             (env-set-status (env-pop-stack e2) 'rev)
-             (env-set-status (env-pop-stack e2) 'reg))))]))
+             (env-set-status (env-set-retval (env-pop-stack e2) val) 'rev)
+             (env-set-status (env-set-retval (env-pop-stack e2) val) 'reg))))]))
   
 
 (define (compile-local-decl ldecl)
@@ -81,25 +84,27 @@
            [e2 (env-set-retval e1 val)])
       e2)))
 
-(define (compile-assign-pointer asptr)
-  (define compiled-asptr (compile-body (assign-pointer-stmt-ptr asptr)))
-  (define name (assign-pointer-stmt-name asptr))
-  (define compiled-val (compile-body (assign-pointer-stmt-val asptr)))
+(define (compile-assign-member asmem)
+  (define compiled-ptr (compile-body (assign-member-stmt-ptr asmem)))
+  (define name (assign-member-stmt-name asmem))
+  (define compiled-val (compile-body (assign-member-stmt-val asmem)))
   (lambda (e)
-    (let* ([e1 (compiled-asptr e)]
+    (let* ([e1 (compiled-ptr e)]
            [ptr (env-get-retval e1)]
            [ptr-val (ref-ptr ptr)]
            [e2 (compiled-val e1)]
            [val (env-get-retval e2)])
       (env-set-ptr-member e2 ptr-val name val))))
            
-
 (define (compile-assign-var assign)
   (define name (assign-var-stmt-name assign))
   (define compiled-val (compile-body (assign-var-stmt-val assign)))
+
   (lambda (e)
-    (let* ([e1 (compiled-val e)]
+    (let* (
+           [e1 (compiled-val e)]
            [val (env-get-retval e1)])
+
       (env-assign-local e1 name val)
       )))
 
@@ -144,6 +149,61 @@
                 newe
                 (env-set-status newe 'ret)))))))
 
+
+(define (compile-binary-builtin bin)
+  (match bin
+    [(binary-builtin-expr op lhs rhs)
+     (define compiled-lhs (compile-body lhs))
+     (define compiled-rhs (compile-body rhs))
+     (cond [(eq? op '+)
+            (lambda (e)
+              (let* ([e1 (compiled-lhs e)]
+                     [lhsval (env-get-retval e1)]
+                     [e2 (compiled-rhs e)]
+                     [rhsval (env-get-retval e2)])
+                (env-set-retval e2 (bvadd lhsval rhsval))))]
+           [(eq? op '-)
+            (lambda (e)
+              (let* ([e1 (compiled-lhs e)]
+                     [lhsval (env-get-retval e1)]
+                     [e2 (compiled-rhs e)]
+                     [rhsval (env-get-retval e2)])
+                (env-set-retval e2 (bvsub lhsval rhsval))))]
+           [(eq? op '*)
+            (lambda (e)
+              (let* ([e1 (compiled-lhs e)]
+                     [lhsval (env-get-retval e1)]
+                     [e2 (compiled-rhs e)]
+                     [rhsval (env-get-retval e2)])
+                (env-set-retval e2 (bvmul lhsval rhsval))))]
+           [(eq? op 'bvor)
+            (lambda (e)
+              (let* ([e1 (compiled-lhs e)]
+                     [lhsval (env-get-retval e1)]
+                     [e2 (compiled-rhs e)]
+                     [rhsval (env-get-retval e2)])
+                (env-set-retval e2 (bvor lhsval rhsval))))]
+           [(eq? op '&)
+            (lambda (e)
+              (let* ([e1 (compiled-lhs e)]
+                     [lhsval (env-get-retval e1)]
+                     [e2 (compiled-rhs e)]
+                     [rhsval (env-get-retval e2)])
+                (env-set-retval e2 (bvand lhsval rhsval))))]
+           [else (car '())])]))
+
+(define (compile-unary-builtin un)
+  (match un
+    [(unary-builtin-expr op operand)
+     (define compiled-operand (compile-body operand))
+     (cond [(eq? op '-)
+            (lambda (e)
+              (let* ([e1 (compiled-operand e)]
+                     [operandval (env-get-retval e1)])
+                (env-set-retval e1 (bvneg operandval))))]
+           [else (car '())])]))
+
+
 (define (compile-if ifstmt)
   (define compiled-condition (compile-body (if-stmt-condition ifstmt)))
   (define compiled-then (compile-body (if-stmt-then ifstmt)))
@@ -154,6 +214,12 @@
       (if condition
           (compiled-then e1)
           (compiled-else e1)))))
+
+(define (compile-new new)
+  (define type (new-slot-stmt-type new))
+  (lambda (e)
+    (let ([cur-ptr-val (env-cur-ptr-val e)])
+      (env-set-retval (env-new-heap-var e type (get-default-val type)) (ref cur-ptr-val)))))
           
 
 (define (compile-sequence seq)
@@ -177,30 +243,32 @@
         [(extract-pointer-stmt? body) (compile-extract-pointer body)]
         [(assign-var-stmt? body) (compile-assign-var body)]
         [(assign-address-stmt? body) (compile-assign-addr body)]
-        [(assign-pointer-stmt? body) (compile-assign-pointer body)]
+        [(assign-member-stmt? body) (compile-assign-member body)]
         [(local-decl-stmt? body) (compile-local-decl body)]
         [(func-call-stmt? body) (compile-func-call body)]
-        [else (void)]))
+        [(if-stmt? body) (compile-if body)]
+        [(new-slot-stmt? body) (compile-new body)]
+        [else (car '())]))
 
 (define (compile-function args body)
   (define compiled-body (compile-body body))
   (lambda (e)
-      (compiled-body
-       (env-set-this (env-bind-args e args)))))
+    (compiled-body
+     (env-set-this (env-bind-args e args)))))
 
 (define (compile-contract env-input contract)
 
-    (define member-decls (filter contract-member-decl? (contract-decl-body contract)))
-    (define initial-val
-      (append
-       (list
-        (binding (integer-type #f 256) 'balance (bv 0 (bitvector 256)))
-        )
-      (map (lambda (x)
-             (match x
-               [(contract-member-decl type name initialval)
-                (binding type name (if (void? initialval) (get-default-val type) initialval))]))
-           member-decls)))
+  (define member-decls (filter contract-member-decl? (contract-decl-body contract)))
+  (define initial-val
+    (append
+     (list
+      (binding (integer-type #f 256) 'balance (bv 0 (bitvector 256)))
+      )
+     (map (lambda (x)
+            (match x
+              [(contract-member-decl type name initialval)
+               (binding type name (if (void? initialval) (get-default-val type) initialval))]))
+          member-decls)))
 
   (define contract-name (contract-decl-name contract))
   (define func-decls (filter func-decl? (contract-decl-body contract)))
@@ -219,17 +287,33 @@
     (define constructor-in-list (filter constructor-decl? (contract-decl-body contract)))
     (if (null? constructor-in-list)
         (begin
-          (define compiled-function (compile-function '() (assign-address-stmt (extract-pointer-stmt (extract-var-stmt 'msg) 'sender) 'balance (extract-pointer-stmt (extract-var-stmt 'msg) 'val))))
+          (define compiled-function
+            (compile-function
+             '()
+             (assign-address-stmt (extract-pointer-stmt (extract-var-stmt 'msg) 'sender)
+                                  'balance (extract-pointer-stmt (extract-var-stmt 'msg) 'val))))
           (lambda (e) (compiled-function (env-set-address-val e (env-get-curraddr e) initial-val))))
         (match (car constructor-in-list)
           [(constructor-decl args body)
-           (define compiled-function (compile-function args (sequence-stmt (assign-address-stmt (extract-pointer-stmt (extract-var-stmt 'msg) 'sender) 'balance (extract-pointer-stmt (extract-var-stmt 'msg) 'val))) body))
+           (define compiled-function
+             (compile-function
+              args
+              (sequence-stmt
+               (list
+                (assign-address-stmt
+                 (extract-pointer-stmt
+                  (extract-var-stmt 'msg)
+                  'sender)
+                 'balance
+                 (extract-pointer-stmt (extract-var-stmt 'msg) 'val))
+                body))))
            (lambda (e)
              (compiled-function (env-set-address-val e (env-get-curraddr e) initial-val)))
            ])))
-  (env-append-func-table env-input
-                         (cons (binding (function-type '() '()) (list contract-name 'internal 'constructor) (constructor))
-                               (compile-functions func-decls))))
+  (env-append-func-table
+   env-input
+   (cons (binding (function-type '() '()) (list contract-name 'internal 'constructor) (constructor))
+         (compile-functions func-decls))))
 
 (define (insert-builtin-functions env)
   (env-append-func-table
@@ -240,8 +324,9 @@
     (binding (function-type (list (address-type) (integer-type #f 256)) '())
              'transfer
              (lambda (e)
-               (let* ([e1 (env-set-this (env-bind-args e (list (arg-decl (address-type) 'target)
-                                                               (arg-decl (integer-type #f 256) 'amount))))]
+               (let* ([e1 (env-set-this
+                           (env-bind-args e (list (arg-decl (address-type) 'target)
+                                                  (arg-decl (integer-type #f 256) 'amount))))]
                       [curraddr (env-get-curraddr e1)]
                       [target (env-resolve-local e1 'target)]
                       [amount (env-resolve-local e1 'amount)]
@@ -254,25 +339,99 @@
                       target 'balance (bvadd amount targetbalance))))))
     (binding (function-type (list (boolean-type)) '()) 'assert
              (lambda (e) (if (not (car (env-get-args e))) (env-set-status e 'rev) e)))
+    (binding (function-type (list (ref-type (mapping-type (type-parameter 'k) (type-parameter 'v)))
+                                  (type-parameter 'k))
+                            (list (type-parameter 'v)))
+             'mapping-get
+             (lambda (e)
+               (let ([e1 (env-set-this
+                          (env-bind-args
+                           e
+                           (list (arg-decl
+                                  (ref-type
+                                   (mapping-type (type-parameter 'k)
+                                                 (type-parameter 'v)))
+                                  'm)
+                                 (arg-decl
+                                  (type-parameter 'k)
+                                  'k))))])
+                 (let* ([r (env-resolve-local e1 'm)]
+                        [ptr (ref-ptr r)]
+                        [val
+                         (resolve-binding-list
+                          (env-resolve-ptr e1 ptr)
+                          (env-resolve-local e1 'k))])
+                   (if (void? val)
+                       (env-set-status e 'rev)
+                       (env-set-retval e1 val))))))
+    (binding (function-type (list (ref-type (mapping-type (type-parameter 'k) (type-parameter 'v)))
+                                  (type-parameter 'k)
+                                  (type-parameter 'v)) '())
+             'mapping-set
+             (lambda (e)
+               (let ([e1 (env-set-this
+                          (env-bind-args
+                           e
+                           (list (arg-decl
+                                  (ref-type
+                                   (mapping-type (type-parameter 'k)
+                                                 (type-parameter 'v)))
+                                  'm)
+                                 (arg-decl
+                                  (type-parameter 'k)
+                                  'k)
+                                 (arg-decl
+                                  (type-parameter 'v)
+                                  'v))))])
+                 (let* ([r (env-resolve-local e1 'm)]
+                        [ptr (ref-ptr r)])
+                   (env-rebind-heap-var
+                    e1
+                    ptr
+                    (rebind-binding-list
+                     (env-resolve-ptr e1 ptr)
+                     (type-parameter 'v)
+                     (env-resolve-local e1 'k)
+                     (env-resolve-local e1 'v)))))))
+    (binding (function-type (list (ref-type (mapping-type (type-parameter 'k) (type-parameter 'v)))
+                                  (type-parameter 'k)) (list (boolean-type)))
+             'mapping-exists
+             (lambda (e)
+               (let ([e1 (env-set-this
+                          (env-bind-args
+                           e
+                           (list (arg-decl
+                                  (ref-type
+                                   (mapping-type (type-parameter 'k)
+                                                 (type-parameter 'v)))
+                                  'm)
+                                 (arg-decl
+                                  (type-parameter 'k)
+                                  'k))))])
+                 (let* ([r (env-resolve-local e1 'm)])
+                   (env-set-retval e1 (not (void? r)))))))
     )))
+
 
 (define (get-initial-env)
   (insert-builtin-functions (get-empty-env)))
                          
 
 (module+ test
-  (displayln (compile-contract (get-initial-env)
-              (contract-decl 'RPS
-                             (list
-                              (contract-member-decl (address-type) 'p1 (void))
-                              (contract-member-decl (address-type) 'p2 (void))
-                              (contract-member-decl (integer-type #f 256) 'num1 (void))
-                              (contract-member-decl (integer-type #f 256) 'num2 (void))
-                              (contract-member-decl (fixed-bytes-type 32) 'hashedHand1 (void))
-                              (contract-member-decl (boolean-type) 'revealed1 #f)
-                              (contract-member-decl (integer-type #t 8) 'hand1 (void))
-                              (contract-member-decl (integer-type #t 8) 'hand2 (void))
-                              (func-decl 'test (list (arg-decl (address-type) 'target)) (list)
-                                         (sequence-stmt (list (return-stmt (extract-var-stmt 'target)))))
-                              ))))
+  (displayln
+   (compile-contract
+    (get-initial-env)
+    (contract-decl 'RPS
+                   (list
+                    (contract-member-decl (address-type) 'p1 (void))
+                    (contract-member-decl (address-type) 'p2 (void))
+                    (contract-member-decl (integer-type #f 256) 'num1 (void))
+                    (contract-member-decl (integer-type #f 256) 'num2 (void))
+                    (contract-member-decl (fixed-bytes-type 32) 'hashedHand1 (void))
+                    (contract-member-decl (boolean-type) 'revealed1 #f)
+                    (contract-member-decl (integer-type #t 8) 'hand1 (void))
+                    (contract-member-decl (integer-type #t 8) 'hand2 (void))
+                    (func-decl 'test (list (arg-decl (address-type) 'target)) (list)
+                               (sequence-stmt (list (return-stmt (extract-var-stmt 'target)))))
+                    ))))
   )

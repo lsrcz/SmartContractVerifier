@@ -42,12 +42,21 @@
             (cons (binding (binding-type cur) name val) rest)
             (cons cur (set-binding-list rest name val))))))
 
+(define (rebind-binding-list binding-list type name val)
+  (if (null? binding-list)
+      (list (binding type name val))
+      (let ([cur (car binding-list)]
+            [rest (cdr binding-list)])
+        (if (eq? name (binding-name cur))
+            (cons (binding (binding-type cur) name val) rest)
+            (cons cur (rebind-binding-list rest type name val))))))
+
 (define (resolve-binding-list binding-list name)
   (if (null? binding-list)
       (void)
       (let ([cur (car binding-list)]
             [rest (cdr binding-list)])
-        (if (eq? name (binding-name cur))
+        (if (equal? name (binding-name cur))
             (binding-val cur)
             (resolve-binding-list rest name)))))
 
@@ -111,7 +120,8 @@
     [(env stack func-table address-env cur-ptr-val heap)
      (let ([cur (car stack)]
            [rest (cdr stack)])
-       (env (cons (frame-add-local cur type name val) rest) func-table address-env cur-ptr-val heap))]))
+       (env
+        (cons (frame-add-local cur type name val) rest) func-table address-env cur-ptr-val heap))]))
 
 (define (env-set-args env-input args)
   (match env-input
@@ -203,7 +213,8 @@
   (match env-input
     [(env stack func-list address-env cur-ptr-val heap)
      (if (frame-exists-local (car stack) name)
-         (env (cons (frame-set-local (car stack) name val) (cdr stack)) func-list address-env cur-ptr-val heap)
+         (env (cons (frame-set-local (car stack) name val) (cdr stack))
+              func-list address-env cur-ptr-val heap)
          (env-assign-address env-input (frame-curraddr (car stack)) name val))]))
 
 (define (env-set-address-val env-input addr val)
@@ -238,11 +249,26 @@
 (define (env-new-heap-var env-input type val)
   (match env-input
     [(env stack func-table address-env cur-ptr-val heap)
-     (env stack func-table address-env (+ 1 cur-ptr-val) (cons (binding type cur-ptr-val val) heap))]))
+     (env stack func-table address-env
+          (+ 1 cur-ptr-val) (cons (binding type cur-ptr-val val) heap))]))
 
 (define (env-new-heap-var-on-stack env-input type name val)
   (define ptrval (ref (env-cur-ptr-val env-input)))
   (env-add-local (env-new-heap-var env-input type val) type name ptrval))
+
+(define (env-rebind-heap-var env-input heapptr val)
+  (define (iter heap)
+    (if (null? heap)
+        (car '())
+        (let ([cur (car heap)]
+              [rest (cdr heap)])
+          (if (eq? heapptr (binding-name cur))
+              (match cur
+                [(binding type name _) (cons (binding type name val) rest)])
+              (cons cur (iter rest))))))
+  (match env-input
+    [(env stack func-table address-env cur-ptr-val heap)
+     (env stack func-table address-env cur-ptr-val (iter heap))]))
 
 
 (define (env-bind-args env-input form-args)
@@ -257,7 +283,8 @@
 (define (env-set-this env-input)
   (match env-input
     [(env stack func-table address-env cur-ptr-val heap)
-     (env (cons (frame-set-this (car stack)) (cdr stack)) func-table address-env cur-ptr-val heap)]))
+     (env
+      (cons (frame-set-this (car stack)) (cdr stack)) func-table address-env cur-ptr-val heap)]))
 
 (define (env-resolve-ptr env-input ptr-val)
   (resolve-binding-list (env-heap env-input) ptr-val))
@@ -290,8 +317,11 @@
         [(address-type? type)
          (format "~a" val)]
         [(ref-type? type)
-         (format "*~a*" (ref-ptr val))]
-        [(struct-type? type) (format-binding-list val)]))
+         (if (void? (ref-ptr val))
+             "*null*"
+             (format "*~a*" (ref-ptr val)))]
+        [(struct-type? type) (format-binding-list val)]
+        [else (format "~a" val)]))
 
 (define (format-binding b)
   (match b
@@ -317,6 +347,32 @@
                     (iter rest))]))))
   (iter (env-address-env env-input)))
 
+(define (env-print-global-defs env-input)
+  (define (iter heap)
+    (if (null? heap)
+        (void)
+        (let ([cur (car heap)]
+              [rest (cdr heap)])
+          (match cur
+            [(binding _ name val)
+             (begin (displayln (format "At heap ~a:\n~a" name (format-binding-list val)))
+                    (iter rest))]))))
+  (iter (env-heap env-input)))
+
+(define (get-default-val type)
+  (cond [(boolean-type? type) #f]
+        [(integer-type? type) (bv 0 (bitvector (integer-type-bitwidth type)))]
+        [(fixed-bytes-type? type) (bv 0 (bitvector (* 4 (fixed-bytes-type-width type))))]
+        [(address-type? type) (bv 0 (bitvector 160))]
+        [(mapping-type? type) (list)]
+        [(ref-type? type) (ref (void))]
+        [else (displayln type) (car '())]))
+
+(define (get-default-ref-val env type)
+  (let ([cur-ptr-val (env-cur-ptr-val env)]
+        [innerty (ref-type-type type)])
+    (cons (env-new-heap-var env innerty (get-default-val env innerty))
+          (ref cur-ptr-val))))
 
 
 
